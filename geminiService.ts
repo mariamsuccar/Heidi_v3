@@ -1,86 +1,55 @@
 import { GoogleGenAI } from "@google/genai";
 import { Message } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-// ------------------------------------------
-// 1. Dummy patient dataset for the demo
-// ------------------------------------------
-const DUMMY_PATIENT = {
-  vaccinations: "The patient received a COVID-19 vaccine in 2021 and a typhoid booster in 2020.",
-  medications: "The patient is taking Metformin 1g BD, Perindopril 4mg AM, and Atorvastatin 20mg Nocte.",
-  allergies: "The patient has a mild maculopapular rash reaction to Penicillin.",
-  imaging: "The most recent imaging is a CT of the head, neck, and abdomen from 2024.",
-  pathology: "Recent pathology includes mild neutropenia in March 2025.",
-  history: "Past history includes hypertension (2018), type 2 diabetes (2020), and appendicectomy (2005)."
-};
-
-// ------------------------------------------
-// 2. Keyword triggers for local dummy answers
-// ------------------------------------------
-const MHR_KEYWORDS = {
-  vaccinations: ["vaccine", "vaccination", "immunisation", "immunization", "covid"],
-  medications: ["medication", "medications", "drug", "prescription"],
-  allergies: ["allergy", "allergies"],
-  imaging: ["scan", "ct", "mri", "xray", "imaging", "radiology"],
-  pathology: ["blood", "pathology", "neutropenia", "blood test", "hba1c"],
-  history: ["history", "past medical", "pmh", "conditions"]
-};
-
-// Simple matcher
-function detectMhrCategory(text: string): keyof typeof DUMMY_PATIENT | null {
-  const lower = text.toLowerCase();
-  for (const category in MHR_KEYWORDS) {
-    const words = MHR_KEYWORDS[category as keyof typeof MHR_KEYWORDS];
-    if (words.some(w => lower.includes(w))) {
-      return category as keyof typeof DUMMY_PATIENT;
-    }
-  }
-  return null;
-}
-
-// ------------------------------------------
-// 3. System instruction for real AI responses
-// ------------------------------------------
-const SYSTEM_INSTRUCTION = `
-You are "Heidi Assist", the AI clinician assistant inside Heidi Pro.
+const SYSTEM_INSTRUCTION = `You are "Heidi Assist", the AI clinician assistant inside Heidi Pro.
 You respond in a concise, clinical, factual tone with no emojis and no markdown.
-`;
 
-// ------------------------------------------
-// 4. Main function (with dummy override)
-// ------------------------------------------
-export const sendMessageToHeidi = async (
-  history: Message[],
-  userMessage: string
-): Promise<string> => {
+You simulate an internal "MHR Query Source" which retrieves ANY patient-specific data
+(vaccinations, pathology, medications, allergies, imaging, discharge summaries, past conditions).
+This source behaves like an RPA workflow scraping the EMR and My Health Record.
+
+DATA SOURCE FOR SIMULATION (Patient: John Doe, Male, 45):
+- Past Medical History: Hypertension (diagnosed 2018), Type 2 Diabetes Mellitus (2020), Mild Osteoarthritis (bilateral knees, 2019), Appendicectomy (2005).
+- Medications: Metformin 1g BD, Perindopril 4mg AM, Atorvastatin 20mg Nocte.
+- Allergies: Penicillin (mild maculopapular rash).
+- Recent Pathology: HbA1c 6.8% (02/02/2024), eGFR >90, Lipids WNL.
+- Recent Imaging: XR Knees (2023) showing mild medial compartment narrowing.
+
+INSTRUCTIONS:
+1. When asked to retrieve data, look up the "DATA SOURCE" above.
+2. Return a ONE-SENTENCE natural-language answer summarizing the findings.
+3. Never show raw backend steps, lists, or technical details.
+4. If the user asks for something not in the record (e.g., "Check for asthma"), respond: "No record of [condition] found in My Health Record."
+
+All answers must look like they belong in Heidi Pro's chat/note interface.
+Do NOT use markdown formatting (like **bold** or *italics*), just plain text.`;
+
+export const sendMessageToHeidi = async (history: Message[], userMessage: string): Promise<string> => {
   try {
-    // 🔥 FIRST: Check if it's an MHR-related query
-    const category = detectMhrCategory(userMessage);
+    const model = 'gemini-2.5-flash';
+    
+    // Construct history for the model
+    // We only take the last few turns to keep context relevance high and token usage optimized
+    const recentHistory = history.slice(-10).map(msg => ({
+      role: msg.role === 'user' ? 'user' : 'model',
+      parts: [{ text: msg.content }],
+    }));
 
-    if (category) {
-      // Return dummy structured answer instantly
-      return DUMMY_PATIENT[category];
-    }
-
-    // Otherwise → use actual Gemini model
-    const model = ai.getGenerativeModel({
-      model: "gemini-2.5-flash",
-      systemInstruction: SYSTEM_INSTRUCTION
+    const chat = ai.chats.create({
+      model: model,
+      history: recentHistory,
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+        temperature: 0.1, // Very low temperature for consistent factual retrieval
+      },
     });
 
-    const chat = model.startChat({
-      history: history.slice(-10).map(m => ({
-        role: m.role === "user" ? "user" : "model",
-        parts: [{ text: m.content }]
-      })),
-      generationConfig: { temperature: 0.2 }
-    });
-
-    const response = await chat.sendMessage(userMessage);
-    return response.response.text();
-  } catch (err) {
-    console.error("Heidi Error:", err);
-    return "Unable to complete the request right now.";
+    const result = await chat.sendMessage({ message: userMessage });
+    return result.text || "No response generated.";
+  } catch (error) {
+    console.error("Error communicating with Heidi:", error);
+    return "Unable to connect to MHR Source. Please try again.";
   }
 };
